@@ -12,6 +12,7 @@ export interface YardTask { id: string; kind: 'receive' | 'deliver' | 'rehandle'
 export interface AuditEvent { id: string; actor: string; action: string; entity: string; entityId: string; at: string; details: string; }
 
 const start = Date.now(); const iso = (minutes: number) => new Date(start + minutes * 60000).toISOString();
+const atClock = (hours: number, minutes: number, dayOffset = 0) => { const d = new Date(start); d.setDate(d.getDate() + dayOffset); d.setHours(hours, minutes, 0, 0); return d.toISOString(); };
 export const voyages: Voyage[] = [
   { id: 'VOY-AX7', vessel: 'MSC Aurora', imo: 'IMO9382014', service: 'AE-3', eta: iso(-90), etd: iso(350), status: 'berthed', berth: 'B07', movesPlanned: 1240, movesDone: 886, lateRisk: 'medium' },
   { id: 'VOY-QF2', vessel: 'Ever Quartz', imo: 'IMO9721103', service: 'TP9', eta: iso(190), etd: iso(890), status: 'approaching', berth: 'B04', movesPlanned: 760, movesDone: 0, lateRisk: 'high' },
@@ -36,7 +37,11 @@ export const appointments: GateAppointment[] = [
   { id: 'APT-9001', containerId: 'OOLU-7734201', truckNo: '沪A·7K229', driver: '陈海', type: 'dropoff', windowStart: iso(-14), windowEnd: iso(16), lane: 'south', status: 'checked-in', sealVerified: true, weightVerified: true },
   { id: 'APT-9002', containerId: 'MSCU-4829017', truckNo: '苏E·66218', driver: '王建国', type: 'pickup', windowStart: iso(34), windowEnd: iso(64), lane: 'north', status: 'booked', sealVerified: false, weightVerified: false },
   { id: 'APT-9003', containerId: 'EISU-1288420', truckNo: '沪B·02891', driver: '赵晨', type: 'pickup', windowStart: iso(38), windowEnd: iso(68), lane: 'north', status: 'booked', sealVerified: false, weightVerified: false },
-  { id: 'APT-9004', containerId: 'FCIU-9920310', truckNo: '沪A·7K229', driver: '陈海', type: 'pickup', windowStart: iso(4), windowEnd: iso(22), lane: 'south', status: 'booked', sealVerified: false, weightVerified: false, exception: '同一车辆相邻窗口过短' }
+  { id: 'APT-9004', containerId: 'FCIU-9920310', truckNo: '沪A·7K229', driver: '陈海', type: 'pickup', windowStart: iso(4), windowEnd: iso(22), lane: 'south', status: 'booked', sealVerified: false, weightVerified: false, exception: '同一车辆相邻窗口过短' },
+  { id: 'APT-9005', containerId: 'TEMU-1774029', truckNo: '浙B·90D55', driver: '林芳', type: 'dropoff', windowStart: iso(-60), windowEnd: iso(-30), lane: 'north', status: 'cancelled', sealVerified: false, weightVerified: false, exception: '司机临时取消' },
+  { id: 'APT-9006', containerId: 'FCIU-9920310', truckNo: '苏E·66218', driver: '王建国', type: 'dropoff', windowStart: iso(80), windowEnd: iso(96), lane: 'north', status: 'booked', sealVerified: false, weightVerified: false },
+  { id: 'APT-9007', containerId: 'CMAU-6001722', truckNo: '津C·5T803', driver: '高磊', type: 'dropoff', windowStart: atClock(21, 30), windowEnd: atClock(1, 0, 1), lane: 'south', status: 'booked', sealVerified: false, weightVerified: false },
+  { id: 'APT-9008', containerId: 'OOLU-7734201', truckNo: '津C·5T803', driver: '高磊', type: 'dropoff', windowStart: atClock(19, 0, 2), windowEnd: atClock(23, 0, 2), lane: 'north', status: 'booked', sealVerified: false, weightVerified: false }
 ];
 export const equipment: Equipment[] = [
   { id: 'QC-07', name: '岸桥 QC-07', kind: 'quay-crane', status: 'working', location: 'B07 / MSC Aurora', battery: 96, queue: 4, movesPerHour: 31 },
@@ -59,13 +64,29 @@ export function dashboard() {
   const yardCapacity = blocks.reduce((sum, block) => sum + block.capacity, 0); const yardOccupied = blocks.reduce((sum, block) => sum + block.occupied, 0);
   return { activeVoyages: activeVoyages.length, berthMoves: activeVoyages.reduce((sum, v) => sum + v.movesPlanned - v.movesDone, 0), yardUtilization: yardOccupied / yardCapacity, gateQueue: appointments.filter(a => a.status === 'checked-in').length + 7, pendingTasks: tasks.filter(t => t.status !== 'done').length, blockedTasks: tasks.filter(t => t.status === 'blocked').length, reeferAlerts: containers.filter(c => c.reefer && (c.customs === 'inspection' || (c.temperature ?? 0) > 5)).length, hazmatHolds: containers.filter(c => c.hazmatClass && c.customs !== 'released').length, lateVessels: activeVoyages.filter(v => v.lateRisk === 'high').length };
 }
-export function gateConflicts() {
-  const result: { severity: 'critical' | 'warning'; appointmentId: string; reason: string }[] = [];
-  appointments.forEach((a, index) => appointments.slice(index + 1).forEach(b => {
-    const overlap = a.truckNo === b.truckNo && new Date(a.windowStart).getTime() < new Date(b.windowEnd).getTime() && new Date(b.windowStart).getTime() < new Date(a.windowEnd).getTime();
-    if (overlap) result.push({ severity: 'critical', appointmentId: a.id, reason: `车辆 ${a.truckNo} 与 ${b.id} 时间窗口重叠，需重新分配闸口时隙` });
+export type GateConflictKind = 'overlap' | 'short-gap' | 'customs';
+export interface GateConflict { severity: 'critical' | 'warning'; kind: GateConflictKind; appointmentId: string; otherId?: string; reason: string; }
+/** 同车相邻预约的最小安全间隔（分钟），低于该值视为间隔过短 */
+export const MIN_TRUCK_TURNAROUND_MIN = 30;
+export function gateConflicts(): GateConflict[] {
+  const result: GateConflict[] = [];
+  // 已取消的预约不再占用车辆时隙，不参与同车冲突计算
+  const active = appointments.filter(a => a.status !== 'cancelled');
+  active.forEach((a, index) => active.slice(index + 1).forEach(b => {
+    if (a.truckNo !== b.truckNo) return;
+    const aStart = new Date(a.windowStart).getTime(), aEnd = new Date(a.windowEnd).getTime();
+    const bStart = new Date(b.windowStart).getTime(), bEnd = new Date(b.windowEnd).getTime();
+    if (aStart < bEnd && bStart < aEnd) {
+      result.push({ severity: 'critical', kind: 'overlap', appointmentId: a.id, otherId: b.id, reason: `车辆 ${a.truckNo} 的 ${a.id} 与 ${b.id} 时间窗口重叠，需重新分配闸口时隙` });
+    } else {
+      const gap = Math.round((Math.max(aStart, bStart) - Math.min(aEnd, bEnd)) / 60000);
+      if (gap < MIN_TRUCK_TURNAROUND_MIN) {
+        const later = aStart <= bStart ? b : a, earlier = aStart <= bStart ? a : b;
+        result.push({ severity: 'warning', kind: 'short-gap', appointmentId: later.id, otherId: earlier.id, reason: `车辆 ${a.truckNo} 的 ${earlier.id} 与 ${later.id} 仅相隔 ${gap} 分钟，低于 ${MIN_TRUCK_TURNAROUND_MIN} 分钟最小周转间隔` });
+      }
+    }
   }));
-  appointments.filter(a => a.status === 'booked').forEach(a => { const container = containers.find(c => c.id === a.containerId); if (container?.customs !== 'released') result.push({ severity: 'warning', appointmentId: a.id, reason: `箱 ${a.containerId} 海关状态为 ${container?.customs}，无法无条件放行` }); });
+  active.filter(a => a.status === 'booked').forEach(a => { const container = containers.find(c => c.id === a.containerId); if (container?.customs !== 'released') result.push({ severity: 'warning', kind: 'customs', appointmentId: a.id, reason: `箱 ${a.containerId} 海关状态为 ${container?.customs}，无法无条件放行` }); });
   return result;
 }
 export function yardHeatmap() { return blocks.map(block => ({ ...block, utilization: block.occupied / block.capacity, freeSlots: block.capacity - block.occupied, pressure: block.heat > 85 ? 'critical' : block.heat > 65 ? 'warning' : 'normal' })); }

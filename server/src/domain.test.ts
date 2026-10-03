@@ -1,6 +1,21 @@
-import test from 'node:test'; import assert from 'node:assert/strict'; import { containerPlan, dashboard, gateConflicts, prioritizeTasks } from './domain.js';
+import test from 'node:test'; import assert from 'node:assert/strict'; import { containerPlan, createGateAppointment, dashboard, deleteGateAppointment, editGateAppointment, gateConflicts, prioritizeTasks } from './domain.js';
 test('dashboard aggregates berth, yard, gate and exception signals', () => { const data = dashboard(); assert.equal(data.activeVoyages, 2); assert.ok(data.yardUtilization > 0.7); assert.ok(data.blockedTasks >= 1); });
 test('gate conflict engine detects same truck overlap', () => { const conflicts = gateConflicts(); assert.ok(conflicts.some(item => item.appointmentId === 'APT-9001' || item.appointmentId === 'APT-9004')); });
+test('gate conflict engine flags short turnaround and ignores cancelled slots', () => {
+  const shortGap = gateConflicts().find(item => item.kind === 'short-gap' && item.appointmentId === 'APT-9006');
+  assert.ok(shortGap, 'APT-9002 与 APT-9006 相隔 16 分钟应被标记为间隔过短');
+  assert.equal(shortGap?.otherId, 'APT-9002');
+});
+test('cancelled appointments are excluded from truck conflict pairs', () => {
+  const base = Date.now();
+  const a = createGateAppointment({ containerId: 'MSCU-4829017', truckNo: 'TEST-CANCEL-1', driver: '测试', type: 'pickup', windowStart: new Date(base + 3600000).toISOString(), windowEnd: new Date(base + 5400000).toISOString(), lane: 'north' });
+  const b = createGateAppointment({ containerId: 'MSCU-4829017', truckNo: 'TEST-CANCEL-1', driver: '测试', type: 'pickup', windowStart: new Date(base + 3900000).toISOString(), windowEnd: new Date(base + 5700000).toISOString(), lane: 'north' });
+  assert.ok(gateConflicts().some(item => (item.appointmentId === a.id || item.appointmentId === b.id) && item.kind === 'overlap'));
+  editGateAppointment(a.id, { status: 'cancelled' });
+  editGateAppointment(b.id, { status: 'cancelled' });
+  assert.equal(gateConflicts().some(item => item.appointmentId === a.id || item.appointmentId === b.id || item.otherId === a.id || item.otherId === b.id), false);
+  deleteGateAppointment(a.id); deleteGateAppointment(b.id);
+});
 test('yard planner respects reefer and hazmat constraints', () => { const plan = containerPlan('TGHU-9831204'); assert.equal(plan?.recommendedBlock?.hazmatAllowed, true); assert.ok(plan?.reasons.some(reason => reason.includes('危险品'))); });
 test('priority queue promotes customs inspection work', () => { const tasks = prioritizeTasks(); assert.equal(tasks[0].containerId, 'TGHU-9831204'); });
 
