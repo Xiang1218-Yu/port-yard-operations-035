@@ -1,6 +1,15 @@
 import test from 'node:test'; import assert from 'node:assert/strict'; import { containerPlan, dashboard, gateConflicts, prioritizeTasks } from './domain.js';
 test('dashboard aggregates berth, yard, gate and exception signals', () => { const data = dashboard(); assert.equal(data.activeVoyages, 2); assert.ok(data.yardUtilization > 0.7); assert.ok(data.blockedTasks >= 1); });
 test('gate conflict engine detects same truck overlap', () => { const conflicts = gateConflicts(); assert.ok(conflicts.some(item => item.appointmentId === 'APT-9001' || item.appointmentId === 'APT-9004')); });
+test('gate conflict engine flags short turnarounds and ignores cancelled slots', () => {
+  const conflicts = gateConflicts();
+  const shortGap = conflicts.filter(item => item.kind === 'short-gap');
+  assert.ok(shortGap.some(item => item.appointmentId === 'APT-9002' && item.otherId === 'APT-9007'));
+  assert.ok(shortGap.some(item => item.appointmentId === 'APT-9007' && item.otherId === 'APT-9002'));
+  assert.equal(conflicts.some(item => item.appointmentId === 'APT-9006'), false);
+  const overlap = conflicts.find(item => item.kind === 'overlap');
+  assert.ok(overlap?.otherId);
+});
 test('yard planner respects reefer and hazmat constraints', () => { const plan = containerPlan('TGHU-9831204'); assert.equal(plan?.recommendedBlock?.hazmatAllowed, true); assert.ok(plan?.reasons.some(reason => reason.includes('危险品'))); });
 test('priority queue promotes customs inspection work', () => { const tasks = prioritizeTasks(); assert.equal(tasks[0].containerId, 'TGHU-9831204'); });
 
